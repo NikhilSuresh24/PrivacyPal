@@ -1,7 +1,7 @@
 import { debounce } from '../utils/debounce';
 import environment from '../config/environment';
 
-console.log('PrivacyPal content script loaded!'); // Immediate log on script load
+console.log('PrivacyPal content script loaded!');
 
 // Content script that scans for privacy policy links
 const PRIVACY_KEYWORDS = [
@@ -14,7 +14,7 @@ const PRIVACY_KEYWORDS = [
 let lastFoundLinks: string[] = [];
 
 // Configuration
-const SCRAPE_ENDPOINT = `${environment.API_URL}/scrape`;
+const API_ENDPOINT = `${environment.API_URL}/scrape`;
 
 interface PrivacyLink {
   text: string;
@@ -27,9 +27,30 @@ interface ScrapeResponse {
   content: string;
 }
 
+interface ChromeMessage {
+  type: string;
+  data: {
+    url: string;
+    links?: PrivacyLink[];
+    content?: string;
+  };
+}
+
+// Helper function to safely send messages
+async function sendMessage(message: ChromeMessage): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    // Ignore "Extension context invalidated" errors
+    if (error instanceof Error && !error.message.includes('Extension context invalidated')) {
+      console.error('Error sending message:', error);
+    }
+  }
+}
+
 async function fetchPrivacyPolicyContent(url: string): Promise<string | null> {
   try {
-    const response = await fetch(`${SCRAPE_ENDPOINT}?url=${encodeURIComponent(url)}`);
+    const response = await fetch(`${API_ENDPOINT}?url=${encodeURIComponent(url)}`);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -93,8 +114,8 @@ async function findPrivacyPolicyLinks(): Promise<PrivacyLink[]> {
       policy: bestLink
     });
 
-    // Send message that we found a link
-    chrome.runtime.sendMessage({
+    // Send message that we found a link and are processing
+    await sendMessage({
       type: 'PRIVACY_LINKS_FOUND',
       data: {
         url: window.location.href,
@@ -107,7 +128,7 @@ async function findPrivacyPolicyLinks(): Promise<PrivacyLink[]> {
     if (content) {
       console.log('📄 Successfully fetched privacy policy content');
       // Send the content to the background script
-      chrome.runtime.sendMessage({
+      await sendMessage({
         type: 'PRIVACY_CONTENT_FETCHED',
         data: {
           url: bestLink.href,
@@ -118,6 +139,14 @@ async function findPrivacyPolicyLinks(): Promise<PrivacyLink[]> {
 
     return [{ text: bestLink.text, href: bestLink.href }];
   }
+
+  // If no privacy policy found, send message
+  await sendMessage({
+    type: 'NO_PRIVACY_LINK',
+    data: {
+      url: window.location.href
+    }
+  });
 
   return [];
 }
@@ -142,14 +171,11 @@ function calculateLinkScore(link: HTMLAnchorElement): number {
   return score;
 }
 
-// Immediate scan before debounce
-console.log('🚀 Starting initial privacy scan...');
-findPrivacyPolicyLinks();
-
-function analyzePage() {
-  const privacyLinksPromise = findPrivacyPolicyLinks();
-  
-  privacyLinksPromise.then(privacyLinks => {
+// Function to analyze the page
+async function analyzePage() {
+  try {
+    const privacyLinks = await findPrivacyPolicyLinks();
+    
     // Convert links to strings for comparison
     const currentLinks = privacyLinks.map(link => link.href);
     
@@ -157,31 +183,53 @@ function analyzePage() {
     if (privacyLinks.length > 0 && 
         JSON.stringify(currentLinks) !== JSON.stringify(lastFoundLinks)) {
       lastFoundLinks = currentLinks;
-      
-      // Send message to background script
-      chrome.runtime.sendMessage({
-        type: 'PRIVACY_LINKS_FOUND',
-        data: {
-          url: window.location.href,
-          links: privacyLinks
-        }
-      });
     }
-  });
+  } catch (error) {
+    // Ignore "Extension context invalidated" errors
+    if (error instanceof Error && !error.message.includes('Extension context invalidated')) {
+      console.error('Error in analyzePage:', error);
+    }
+  }
 }
+
+// Immediate scan before debounce
+console.log('🚀 Starting initial privacy scan...');
+analyzePage();
 
 // Debounced version of analyzePage
 const debouncedAnalyzePage = debounce(analyzePage, 1000);
 
-// Run debounced analysis
-debouncedAnalyzePage();
+// Create observer
+let observer: MutationObserver | null = null;
 
-// Listen for DOM changes (in case links are loaded dynamically)
-const observer = new MutationObserver(() => {
-  debouncedAnalyzePage();
-});
+// Function to start observing
+function startObserving() {
+  if (observer) return;
+  
+  observer = new MutationObserver(() => {
+    debouncedAnalyzePage();
+  });
 
-observer.observe(document.body, {
-  childList: true,
-  subtree: true
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+}
+
+// Function to stop observing
+function stopObserving() {
+  if (observer) {
+    observer.disconnect();
+    observer = null;
+  }
+}
+
+// Start observing
+startObserving();
+
+// Setup cleanup
+const port = chrome.runtime.connect({ name: 'content-script-cleanup' });
+port.onDisconnect.addListener(() => {
+  stopObserving();
+  lastFoundLinks = [];
 }); 

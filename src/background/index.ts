@@ -11,6 +11,22 @@ interface PrivacyContent {
 // Store privacy policies for each domain
 const privacyPolicies = new Map<string, PrivacyContent>();
 
+// Badge states
+const BADGE_STATES = {
+  NO_POLICY: {
+    text: '✓',
+    color: '#4CAF50' // Green
+  },
+  PROCESSING: {
+    text: '⚙️',
+    color: '#1976D2' // Blue
+  },
+  CONTENT_LOADED: {
+    text: '❗',
+    color: '#FFA000' // Orange
+  }
+} as const;
+
 function getDomainFromUrl(url: string): string {
   try {
     const hostname = new URL(url).hostname;
@@ -20,6 +36,18 @@ function getDomainFromUrl(url: string): string {
   } catch {
     return '';
   }
+}
+
+// Function to update badge
+function updateBadge(state: keyof typeof BADGE_STATES, tabId: number) {
+  chrome.action.setBadgeText({ 
+    text: BADGE_STATES[state].text,
+    tabId 
+  });
+  chrome.action.setBadgeBackgroundColor({ 
+    color: BADGE_STATES[state].color,
+    tabId 
+  });
 }
 
 // Listen for messages from content script and popup
@@ -46,16 +74,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   let contentData: PrivacyContent;
   
   switch (message.type) {
+    case 'NO_PRIVACY_LINK':
+      updateBadge('NO_POLICY', tabId);
+      sendResponse({ status: 'received' });
+      break;
+
     case 'PRIVACY_LINKS_FOUND':
-      // Update badge to show we found a privacy policy
-      chrome.action.setBadgeText({ 
-        text: '✓',
-        tabId 
-      });
-      chrome.action.setBadgeBackgroundColor({ 
-        color: '#4CAF50',
-        tabId 
-      });
+      // Update badge to show we're processing
+      updateBadge('PROCESSING', tabId);
       sendResponse({ status: 'received' });
       break;
 
@@ -65,6 +91,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Store the privacy policy content
         privacyPolicies.set(domain, contentData);
         console.log(`📥 Stored privacy policy for ${domain}`);
+        
+        // Update badge to show content is loaded
+        updateBadge('CONTENT_LOADED', tabId);
         
         // Notify any open popup
         try {
