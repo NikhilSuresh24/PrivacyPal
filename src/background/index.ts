@@ -3,13 +3,14 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('PrivacyPal installed');
 });
 
+import type { Analysis } from '../types/analysis';
+
 interface PrivacyContent {
   url: string;
   content: string;
+  analysis?: Analysis;
+  timestamp: number;  // Add timestamp for cache management
 }
-
-// Store privacy policies for each domain
-const privacyPolicies = new Map<string, PrivacyContent>();
 
 // Badge states
 const BADGE_STATES = {
@@ -50,17 +51,54 @@ function updateBadge(state: keyof typeof BADGE_STATES, tabId: number) {
   });
 }
 
+// Function to store privacy content in chrome.storage.local
+async function storePrivacyContent(domain: string, content: PrivacyContent): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [domain]: content });
+    console.log(`📥 Stored privacy policy for ${domain} in local storage:`, content);
+  } catch (error) {
+    console.error('Error storing privacy content:', error);
+  }
+}
+
+// Function to get privacy content from chrome.storage.local
+async function getPrivacyContent(domain: string): Promise<PrivacyContent | null> {
+  try {
+    const result = await chrome.storage.local.get(domain);
+    return result[domain] || null;
+  } catch (error) {
+    console.error('Error getting privacy content:', error);
+    return null;
+  }
+}
+
 // Listen for messages from content script and popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.log('Background received message:', message);
+  
   // For GET_PRIVACY_POLICY requests from popup
   if (message.type === 'GET_PRIVACY_POLICY') {
     if (message.domain) {
-      const policy = privacyPolicies.get(message.domain);
-      sendResponse(policy || null);
-    } else {
-      sendResponse(null);
+      // Use async/await with chrome.storage.local
+      getPrivacyContent(message.domain)
+        .then(policy => {
+          console.log('Found cached policy for domain:', message.domain, policy);
+          sendResponse(policy);
+        })
+        .catch(error => {
+          console.error('Error getting cached policy:', error);
+          sendResponse(null);
+        });
+      return true; // Will respond asynchronously
     }
-    return true; // Will respond asynchronously
+    sendResponse(null);
+    return true;
+  }
+
+  // For OPEN_POPUP requests from content script
+  if (message.type === 'OPEN_POPUP') {
+    chrome.action.openPopup();
+    return true;
   }
 
   // For messages from content script
@@ -86,29 +124,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'PRIVACY_CONTENT_FETCHED':
-      contentData = message.data as PrivacyContent;
+      console.log('Received PRIVACY_CONTENT_FETCHED:', message.data);
+      contentData = {
+        ...message.data,
+        timestamp: Date.now()
+      } as PrivacyContent;
+      
       if (domain) {
-        // Store the privacy policy content
-        privacyPolicies.set(domain, contentData);
-        console.log(`📥 Stored privacy policy for ${domain}`);
-        
-        // Update badge to show content is loaded
-        updateBadge('CONTENT_LOADED', tabId);
-        
-        // Notify any open popup
-        try {
-          chrome.runtime.sendMessage({
-            type: 'PRIVACY_CONTENT_UPDATED',
-            data: contentData
-          }).catch(() => {
-            // Ignore errors when popup is not open
-            console.log('No popup listening for updates');
+        // Store the privacy policy content in chrome.storage.local
+        storePrivacyContent(domain, contentData)
+          .then(() => {
+            // Update badge to show content is loaded
+            updateBadge('CONTENT_LOADED', tabId);
+            sendResponse({ status: 'content_stored' });
+          })
+          .catch(error => {
+            console.error('Error storing content:', error);
+            sendResponse({ error: 'Failed to store content' });
           });
-        } catch {
-          // Ignore errors when message passing fails
-        }
-
-        sendResponse({ status: 'content_stored' });
+        return true; // Will respond asynchronously
       } else {
         sendResponse({ error: 'Invalid domain' });
       }
@@ -118,7 +152,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ error: 'Unknown message type' });
   }
 
-  return true; // Will respond asynchronously
+  return true;
 });
 
 // Handle connection errors

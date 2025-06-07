@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import puppeteer from 'puppeteer';
+import { analyzePrivacyPolicy } from './llmAnalyzer.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -8,14 +9,6 @@ const port = process.env.PORT || 3000;
 // Enable CORS for the Chrome extension
 app.use(cors());
 app.use(express.json());
-
-// Helper function to clean text content
-const cleanText = (text) => {
-    return text
-        .replace(/\s+/g, ' ')
-        .replace(/\n+/g, '\n')
-        .trim();
-};
 
 // Initialize browser instance
 let browser;
@@ -70,11 +63,41 @@ app.get('/scrape', async(req, res) => {
             });
 
             // Clean the content
-            const cleanedContent = cleanText(content);
+            const cleanedContent = content.replace(/\s+/g, ' ').trim();
+
+            // Only analyze if there's actual content
+            if (!cleanedContent) {
+                return res.json({
+                    url,
+                    content: '',
+                    analysis: null,
+                    message: 'No content found to analyze'
+                });
+            }
+
+            // Check if content looks like a privacy policy
+            const privacyRelatedTerms = ['privacy', 'data', 'collection', 'personal information', 'cookies'];
+            const hasPrivacyTerms = privacyRelatedTerms.some(term =>
+                cleanedContent.toLowerCase().includes(term)
+            );
+
+            if (!hasPrivacyTerms) {
+                return res.json({
+                    url,
+                    content: cleanedContent,
+                    analysis: null,
+                    message: 'Content does not appear to be a privacy policy'
+                });
+            }
+
+            // Analyze the privacy policy
+            const analysis = await analyzePrivacyPolicy(cleanedContent);
 
             res.json({
                 url,
-                content: cleanedContent
+                content: cleanedContent,
+                analysis,
+                message: 'Successfully analyzed privacy policy'
             });
 
         } finally {
